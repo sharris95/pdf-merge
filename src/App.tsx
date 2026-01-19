@@ -182,7 +182,9 @@ export default function App() {
       }
 
       const outBytes = await mergedPdf.save();
-      const blob = new Blob([outBytes], { type: "application/pdf" });
+      const blob = new Blob([outBytes as unknown as BlobPart], {
+        type: "application/pdf",
+      });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement("a");
