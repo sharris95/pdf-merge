@@ -2,8 +2,8 @@
 
 Merge multiple PDF files locally in your browser. Drag to reorder, then merge and download.
 
-![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-live-brightgreen?logo=github)
-![Vercel](https://img.shields.io/badge/Vercel-live-black?logo=vercel)
+[![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-live-brightgreen?logo=github)](https://sharris95.github.io/pdf-merge/)
+[![Vercel](https://img.shields.io/badge/Vercel-live-black?logo=vercel)](https://pdf-merge-lime.vercel.app/)
 
 ## Features
 
