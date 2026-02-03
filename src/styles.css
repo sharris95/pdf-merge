@@ -12,6 +12,8 @@
 
   --accent-merge: #c23a2b;
   --accent-img: #1f7a3f;
+  --accent-extract: #1b5aa6;
+  --accent: var(--accent-merge);
 }
 
 * {
@@ -37,10 +39,10 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.035) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(0, 0, 0, 0.035) 1px, transparent 1px);
+  background-image: linear-gradient(to right, rgba(0, 0, 0, 0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.02) 1px, transparent 1px);
   background-size: 44px 44px;
-  opacity: 0.35;
+  opacity: 0.2;
 }
 
 #root {
@@ -188,11 +190,12 @@ body::before {
 
 .btn {
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.92);
   border-radius: 12px;
   padding: 10px 12px;
   font: inherit;
   cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
 }
 
 .btn:disabled {
@@ -201,10 +204,19 @@ body::before {
 }
 
 .btnPrimary {
-  border-color: rgba(0, 0, 0, 0.18);
-  background: #141313;
+  border-color: transparent;
+  background: var(--accent);
   color: white;
   font-weight: 700;
+  box-shadow: 0 10px 18px rgba(0, 0, 0, 0.14);
+}
+
+.btnPrimary:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.btnPrimary:disabled {
+  box-shadow: none;
 }
 
 .btnRow {
@@ -230,13 +242,36 @@ body::before {
 }
 
 select,
-input[type="number"] {
+input[type="number"],
+input[type="text"] {
   width: 100%;
   padding: 10px 10px;
   border-radius: 12px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.95);
   font: inherit;
+}
+
+.toggleRow {
+  display: grid;
+  gap: 6px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.toggle input {
+  accent-color: var(--accent);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .error {
@@ -261,7 +296,7 @@ input[type="number"] {
 
 .listHeader {
   display: grid;
-  grid-template-columns: 48px 1fr 140px 160px;
+  grid-template-columns: 48px 1fr 140px 220px;
   gap: 10px;
   padding: 10px 12px;
   font-size: 12.5px;
@@ -271,7 +306,7 @@ input[type="number"] {
 
 .row {
   display: grid;
-  grid-template-columns: 48px 1fr 140px 160px;
+  grid-template-columns: 48px 1fr 140px 220px;
   gap: 10px;
   padding: 10px 12px;
   align-items: center;
@@ -327,8 +362,71 @@ input[type="number"] {
 }
 
 .empty {
-  padding: 18px;
+  padding: 24px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.6);
+  text-align: left;
+}
+
+.emptyTitle {
+  font-weight: 700;
+  font-size: 16px;
+  margin-bottom: 6px;
+}
+
+.emptyNote {
   color: var(--muted);
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 10px 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
+  z-index: 10;
+}
+
+.toastMsg {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.toastBtn,
+.toastClose {
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.toastBtn {
+  border-color: transparent;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .listHeader,
+  .row {
+    grid-template-columns: 42px 1fr 120px 200px;
+  }
+  .toast {
+    width: calc(100% - 24px);
+    justify-content: space-between;
+  }
 }
 
 .shellFooter {

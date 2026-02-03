@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { PDFDocument, degrees, rgb } from "pdf-lib";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 import {
   DndContext,
   PointerSensor,
@@ -15,8 +15,10 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import Toast from "./components/Toast";
+import { useLocalStorageState } from "./hooks/useLocalStorageState";
 
-type Tool = "merge" | "img2pdf";
+type Tool = "merge" | "img2pdf" | "extract";
 
 type PdfItem = {
   id: string;
@@ -40,6 +42,12 @@ type ImgSettings = {
   margin: number;
 };
 
+type UndoState = {
+  tool: Tool;
+  item: PdfItem | ImgItem;
+  index: number;
+};
+
 const PAGE_SIZES = {
   letter: { w: 612, h: 792 },
   a4: { w: 595.28, h: 841.89 },
@@ -55,6 +63,13 @@ function bytesToMb(bytes: number) {
 
 function ymd() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function sanitizeFilename(input: string, fallback: string) {
+  const cleaned = input.replace(/[\\/:*?"<>|]/g, "").trim();
+  const base = cleaned.length ? cleaned : fallback;
+  const withExt = base.toLowerCase().endsWith(".pdf") ? base : `${base}.pdf`;
+  return withExt;
 }
 
 async function getPdfPageCount(file: File): Promise<number | null> {
@@ -104,28 +119,73 @@ function downloadBytes(bytes: Uint8Array, filename: string, mime: string) {
 }
 
 function accentFor(tool: Tool) {
-  return tool === "merge" ? "var(--accent-merge)" : "var(--accent-img)";
+  if (tool === "merge") return "var(--accent-merge)";
+  if (tool === "img2pdf") return "var(--accent-img)";
+  return "var(--accent-extract)";
 }
 
 function toolLabel(tool: Tool) {
-  return tool === "merge" ? "Merge PDFs" : "Images → PDF";
+  if (tool === "merge") return "Merge PDFs";
+  if (tool === "img2pdf") return "Images → PDF";
+  return "Extract Pages";
 }
 
 function toolSubtitle(tool: Tool) {
   if (tool === "merge") {
     return "Drop PDFs, reorder, merge, download. Runs locally in your browser.";
   }
-  return "Drop JPG/PNG images, reorder, convert to a single PDF. Runs locally in your browser.";
+  if (tool === "img2pdf") {
+    return "Drop JPG/PNG images, reorder, convert to a single PDF. Runs locally in your browser.";
+  }
+  return "Select pages from a PDF and download a new file. Runs locally in your browser.";
 }
 
 function hashToTool(hash: string): Tool {
   const h = hash.replace("#", "").trim();
   if (h === "img" || h === "img2pdf" || h === "images") return "img2pdf";
+  if (h === "extract" || h === "pages") return "extract";
   return "merge";
 }
 
 function toolToHash(tool: Tool) {
-  return tool === "merge" ? "merge" : "img2pdf";
+  if (tool === "merge") return "merge";
+  if (tool === "img2pdf") return "img2pdf";
+  return "extract";
+}
+
+function parsePageRange(range: string, totalPages: number) {
+  const cleaned = range.replace(/\s+/g, "");
+  if (!cleaned) return null;
+  const tokens = cleaned.split(",");
+  const pages: number[] = [];
+  const seen = new Set<number>();
+
+  for (const token of tokens) {
+    if (!token) return null;
+    if (/^\d+$/.test(token)) {
+      const n = Number(token);
+      if (n < 1 || n > totalPages) return null;
+      if (!seen.has(n)) {
+        pages.push(n - 1);
+        seen.add(n);
+      }
+      continue;
+    }
+    if (/^\d+-\d+$/.test(token)) {
+      const [start, end] = token.split("-").map(Number);
+      if (start < 1 || end < 1 || start > end || end > totalPages) return null;
+      for (let i = start; i <= end; i += 1) {
+        if (!seen.has(i)) {
+          pages.push(i - 1);
+          seen.add(i);
+        }
+      }
+      continue;
+    }
+    return null;
+  }
+
+  return pages.length ? pages : null;
 }
 
 function SortableRow(props: {
@@ -172,24 +232,109 @@ function SortableRow(props: {
 }
 
 export default function App() {
-  const [tool, setTool] = useState<Tool>(() => hashToTool(window.location.hash));
+  const [tool, setTool] = useLocalStorageState<Tool>("pdfkit_tool", "merge");
 
   const [pdfItems, setPdfItems] = useState<PdfItem[]>([]);
   const [imgItems, setImgItems] = useState<ImgItem[]>([]);
+  const [extractItem, setExtractItem] = useState<PdfItem | null>(null);
+  const [extractRange, setExtractRange] = useState("");
+
+  const [mergeFilename, setMergeFilename] = useLocalStorageState(
+    "pdfkit_merge_filename",
+    `merged_${ymd()}.pdf`
+  );
+  const [imgFilename, setImgFilename] = useLocalStorageState(
+    "pdfkit_img_filename",
+    `images_${ymd()}.pdf`
+  );
+  const [extractFilename, setExtractFilename] = useLocalStorageState(
+    "pdfkit_extract_filename",
+    `extracted_${ymd()}.pdf`
+  );
 
   const [isWorking, setIsWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [imgSettings, setImgSettings] = useState<ImgSettings>({
-    pageSize: "letter",
-    fit: "contain",
-    orientation: "auto",
-    margin: 24,
-  });
+  const [addPageNumbers, setAddPageNumbers] = useState(false);
+  const [watermarkEnabled, setWatermarkEnabled] = useState(false);
+  const [watermarkText, setWatermarkText] = useState("");
+
+  const [imgSettings, setImgSettings] = useLocalStorageState<ImgSettings>(
+    "pdfkit_img_settings",
+    {
+      pageSize: "letter",
+      fit: "contain",
+      orientation: "auto",
+      margin: 24,
+    }
+  );
+
+  const [undo, setUndo] = useState<UndoState | null>(null);
+  const undoRef = useRef<UndoState | null>(null);
+  const undoTimeout = useRef<number | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
+
+  function finalizeUndo(state: UndoState | null) {
+    if (!state) return;
+    if (state.tool === "img2pdf") {
+      const img = state.item as ImgItem;
+      URL.revokeObjectURL(img.url);
+    }
+  }
+
+  function clearUndo(finalize: boolean) {
+    if (undoTimeout.current) {
+      window.clearTimeout(undoTimeout.current);
+      undoTimeout.current = null;
+    }
+    if (finalize) finalizeUndo(undoRef.current);
+    undoRef.current = null;
+    setUndo(null);
+  }
+
+  function pushUndo(next: UndoState) {
+    clearUndo(true);
+    undoRef.current = next;
+    setUndo(next);
+    undoTimeout.current = window.setTimeout(() => {
+      finalizeUndo(undoRef.current);
+      undoRef.current = null;
+      setUndo(null);
+      undoTimeout.current = null;
+    }, 5000);
+  }
+
+  function handleUndo() {
+    const state = undoRef.current;
+    if (!state) return;
+
+    if (state.tool === "merge") {
+      setPdfItems((prev) => {
+        const copy = [...prev];
+        copy.splice(state.index, 0, state.item as PdfItem);
+        return copy;
+      });
+    } else if (state.tool === "img2pdf") {
+      setImgItems((prev) => {
+        const copy = [...prev];
+        copy.splice(state.index, 0, state.item as ImgItem);
+        return copy;
+      });
+    } else {
+      setExtractItem(state.item as PdfItem);
+    }
+
+    clearUndo(false);
+  }
+
+  useEffect(() => {
+    if (window.location.hash) {
+      setTool(hashToTool(window.location.hash));
+    }
+  }, [setTool]);
 
   useEffect(() => {
     const onHash = () => setTool(hashToTool(window.location.hash));
@@ -202,11 +347,30 @@ export default function App() {
     if (window.location.hash !== next) window.location.hash = next;
   }, [tool]);
 
-  const activeCount = tool === "merge" ? pdfItems.length : imgItems.length;
+  useEffect(() => {
+    setError(null);
+    clearUndo(true);
+  }, [tool]);
+
+  const activeCount =
+    tool === "merge"
+      ? pdfItems.length
+      : tool === "img2pdf"
+      ? imgItems.length
+      : extractItem
+      ? 1
+      : 0;
   const activeBytes = useMemo(() => {
-    const list = tool === "merge" ? pdfItems : imgItems;
+    const list =
+      tool === "merge"
+        ? pdfItems
+        : tool === "img2pdf"
+        ? imgItems
+        : extractItem
+        ? [extractItem]
+        : [];
     return list.reduce((sum, it) => sum + it.file.size, 0);
-  }, [tool, pdfItems, imgItems]);
+  }, [tool, pdfItems, imgItems, extractItem]);
 
   const activeMb = useMemo(() => bytesToMb(activeBytes), [activeBytes]);
 
@@ -214,6 +378,8 @@ export default function App() {
     const { active, over } = e;
     if (!over) return;
     if (active.id === over.id) return;
+
+    if (tool === "extract") return;
 
     if (tool === "merge") {
       setPdfItems((prev) => {
@@ -234,32 +400,83 @@ export default function App() {
   }
 
   function removePdf(id: string) {
-    setPdfItems((prev) => prev.filter((x) => x.id !== id));
-  }
-
-  function removeImg(id: string) {
-    setImgItems((prev) => {
-      const target = prev.find((x) => x.id === id);
-      if (target) URL.revokeObjectURL(target.url);
+    setPdfItems((prev) => {
+      const index = prev.findIndex((x) => x.id === id);
+      if (index === -1) return prev;
+      const item = prev[index];
+      pushUndo({ tool: "merge", item, index });
       return prev.filter((x) => x.id !== id);
     });
   }
 
+  function removeImg(id: string) {
+    setImgItems((prev) => {
+      const index = prev.findIndex((x) => x.id === id);
+      if (index === -1) return prev;
+      const item = prev[index];
+      pushUndo({ tool: "img2pdf", item, index });
+      return prev.filter((x) => x.id !== id);
+    });
+  }
+
+  function removeExtract() {
+    if (!extractItem) return;
+    pushUndo({ tool: "extract", item: extractItem, index: 0 });
+    setExtractItem(null);
+  }
+
+  function movePdf(index: number, dir: -1 | 1) {
+    setPdfItems((prev) => arrayMove(prev, index, index + dir));
+  }
+
+  function moveImg(index: number, dir: -1 | 1) {
+    setImgItems((prev) => arrayMove(prev, index, index + dir));
+  }
+
   function clearActive() {
     setError(null);
+    clearUndo(true);
     if (tool === "merge") {
       setPdfItems([]);
       return;
     }
-    setImgItems((prev) => {
-      prev.forEach((x) => URL.revokeObjectURL(x.url));
-      return [];
-    });
+    if (tool === "img2pdf") {
+      setImgItems((prev) => {
+        prev.forEach((x) => URL.revokeObjectURL(x.url));
+        return [];
+      });
+      return;
+    }
+    setExtractItem(null);
   }
 
   function addFiles(fileList: FileList | null) {
     setError(null);
     if (!fileList || fileList.length === 0) return;
+
+    if (tool === "extract") {
+      const pdfs = Array.from(fileList).filter(
+        (f) =>
+          f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")
+      );
+      if (pdfs.length === 0) {
+        setError("No PDFs detected. Please add a PDF file.");
+        return;
+      }
+      if (pdfs.length > 1) {
+        setError("Please add only one PDF for extraction.");
+        return;
+      }
+      const file = pdfs[0];
+      const next: PdfItem = { id: crypto.randomUUID(), file, pages: null };
+      setExtractItem(next);
+      getPdfPageCount(file).then((pages) => {
+        setExtractItem((prev) =>
+          prev ? { ...prev, pages } : prev
+        );
+      });
+      return;
+    }
 
     if (tool === "merge") {
       const pdfs = Array.from(fileList).filter(
@@ -349,8 +566,48 @@ export default function App() {
         copiedPages.forEach((p) => mergedPdf.addPage(p));
       }
 
+      if (addPageNumbers || (watermarkEnabled && watermarkText.trim())) {
+        const font = await mergedPdf.embedFont(StandardFonts.Helvetica);
+        const pages = mergedPdf.getPages();
+        const totalPages = pages.length;
+        const markText = watermarkText.trim();
+
+        pages.forEach((page, idx) => {
+          const { width, height } = page.getSize();
+
+          if (addPageNumbers) {
+            const text = `${idx + 1} / ${totalPages}`;
+            const size = 10;
+            const textWidth = font.widthOfTextAtSize(text, size);
+            page.drawText(text, {
+              x: width - textWidth - 10,
+              y: 10,
+              size,
+              font,
+              color: rgb(0, 0, 0),
+              opacity: 0.45,
+            });
+          }
+
+          if (watermarkEnabled && markText) {
+            const size = Math.min(48, Math.max(24, width / 10));
+            const textWidth = font.widthOfTextAtSize(markText, size);
+            page.drawText(markText, {
+              x: (width - textWidth) / 2,
+              y: height / 2,
+              size,
+              font,
+              color: rgb(0, 0, 0),
+              opacity: 0.12,
+              rotate: degrees(-35),
+            });
+          }
+        });
+      }
+
       const outBytes = await mergedPdf.save();
-      downloadBytes(outBytes, `merged_${ymd()}.pdf`, "application/pdf");
+      const name = sanitizeFilename(mergeFilename, `merged_${ymd()}.pdf`);
+      downloadBytes(outBytes, name, "application/pdf");
     } catch (err: any) {
       setError(err?.message ?? "Merge failed.");
     } finally {
@@ -467,7 +724,8 @@ export default function App() {
       }
 
       const outBytes = await pdfDoc.save();
-      downloadBytes(outBytes, `images_${ymd()}.pdf`, "application/pdf");
+      const name = sanitizeFilename(imgFilename, `images_${ymd()}.pdf`);
+      downloadBytes(outBytes, name, "application/pdf");
     } catch (err: any) {
       setError(err?.message ?? "Convert failed.");
     } finally {
@@ -475,11 +733,58 @@ export default function App() {
     }
   }
 
-  const listItems = tool === "merge" ? pdfItems : imgItems;
+  async function extractAndDownload() {
+    setError(null);
+    if (!extractItem) {
+      setError("Add a PDF to extract from.");
+      return;
+    }
+    if (!extractRange.trim()) {
+      setError("Enter a page range like 1-3,6,9-12.");
+      return;
+    }
+
+    setIsWorking(true);
+    try {
+      const bytes = await extractItem.file.arrayBuffer();
+      const src = await PDFDocument.load(bytes, { ignoreEncryption: true });
+      const totalPages = src.getPageCount();
+      const indices = parsePageRange(extractRange, totalPages);
+
+      if (!indices) {
+        setError(`Invalid range. Use values between 1 and ${totalPages}.`);
+        return;
+      }
+
+      const out = await PDFDocument.create();
+      const copied = await out.copyPages(src, indices);
+      copied.forEach((p) => out.addPage(p));
+
+      const outBytes = await out.save();
+      const name = sanitizeFilename(extractFilename, `extracted_${ymd()}.pdf`);
+      downloadBytes(outBytes, name, "application/pdf");
+    } catch (err: any) {
+      setError(err?.message ?? "Extraction failed.");
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  const listItems =
+    tool === "merge"
+      ? pdfItems
+      : tool === "img2pdf"
+      ? imgItems
+      : extractItem
+      ? [extractItem]
+      : [];
   const dndIds = listItems.map((x) => x.id);
 
   return (
-    <div className="wrap">
+    <div
+      className="wrap"
+      style={{ "--accent": accentFor(tool) } as React.CSSProperties}
+    >
       <div className="shell">
         <div className="shellHeader">
           <div className="topRow">
@@ -526,6 +831,18 @@ export default function App() {
               />
               Images → PDF
             </button>
+            <button
+              type="button"
+              className="tabBtn"
+              aria-selected={tool === "extract"}
+              onClick={() => setTool("extract")}
+            >
+              <span
+                className="brandDot"
+                style={{ background: "var(--accent-extract)" }}
+              />
+              Extract Pages
+            </button>
           </div>
         </div>
 
@@ -542,12 +859,16 @@ export default function App() {
               >
                 <div className="dzRow">
                   <label className="btn" style={{ fontWeight: 700 }}>
-                    {tool === "merge" ? "Add PDFs" : "Add Images"}
+                    {tool === "merge"
+                      ? "Add PDFs"
+                      : tool === "img2pdf"
+                      ? "Add Images"
+                      : "Add PDF"}
                     <input
                       type="file"
-                      multiple
+                      multiple={tool !== "extract"}
                       accept={
-                        tool === "merge"
+                        tool === "merge" || tool === "extract"
                           ? "application/pdf,.pdf"
                           : "image/png,image/jpeg,.png,.jpg,.jpeg"
                       }
@@ -583,15 +904,29 @@ export default function App() {
                       >
                         {isWorking ? "Merging..." : "Merge + Download"}
                       </button>
-                    ) : (
+                    ) : tool === "img2pdf" ? (
                       <button
                         type="button"
                         className="btn btnPrimary"
                         onClick={imagesToPdf}
                         disabled={isWorking || imgItems.length < 1}
-                        title={imgItems.length < 1 ? "Add at least one image" : "Convert and download"}
+                        title={
+                          imgItems.length < 1
+                            ? "Add at least one image"
+                            : "Convert and download"
+                        }
                       >
                         {isWorking ? "Converting..." : "Convert + Download"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btnPrimary"
+                        onClick={extractAndDownload}
+                        disabled={isWorking || !extractItem}
+                        title={!extractItem ? "Add a PDF to extract" : "Extract and download"}
+                      >
+                        {isWorking ? "Extracting..." : "Extract + Download"}
                       </button>
                     )}
                   </div>
@@ -605,8 +940,72 @@ export default function App() {
                 )}
               </div>
 
+              {tool === "merge" && (
+                <div className="settings">
+                  <div className="field">
+                    <div className="label">Output filename</div>
+                    <input
+                      type="text"
+                      value={mergeFilename}
+                      onChange={(e) => setMergeFilename(e.target.value)}
+                      placeholder={`merged_${ymd()}.pdf`}
+                      disabled={isWorking}
+                    />
+                  </div>
+
+                  <div className="field toggleRow">
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={addPageNumbers}
+                        onChange={(e) => setAddPageNumbers(e.target.checked)}
+                        disabled={isWorking}
+                      />
+                      Add page numbers
+                    </label>
+                    <span className="hint">Bottom-right, subtle.</span>
+                  </div>
+
+                  <div className="field toggleRow">
+                    <label className="toggle">
+                      <input
+                        type="checkbox"
+                        checked={watermarkEnabled}
+                        onChange={(e) => setWatermarkEnabled(e.target.checked)}
+                        disabled={isWorking}
+                      />
+                      Watermark text
+                    </label>
+                  </div>
+
+                  {watermarkEnabled && (
+                    <div className="field">
+                      <div className="label">Watermark</div>
+                      <input
+                        type="text"
+                        value={watermarkText}
+                        onChange={(e) => setWatermarkText(e.target.value)}
+                        placeholder="Confidential"
+                        disabled={isWorking}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
               {tool === "img2pdf" && (
                 <div className="settings">
+                  <div className="field">
+                    <div className="label">Output filename</div>
+                    <input
+                      type="text"
+                      value={imgFilename}
+                      onChange={(e) => setImgFilename(e.target.value)}
+                      placeholder={`images_${ymd()}.pdf`}
+                      disabled={isWorking}
+                    />
+                  </div>
+
                   <div className="field">
                     <div className="label">Page size</div>
                     <select
@@ -648,7 +1047,8 @@ export default function App() {
                       onChange={(e) =>
                         setImgSettings((s) => ({
                           ...s,
-                          orientation: e.target.value as ImgSettings["orientation"],
+                          orientation:
+                            e.target.value as ImgSettings["orientation"],
                         }))
                       }
                       disabled={isWorking}
@@ -678,16 +1078,43 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {tool === "extract" && (
+                <div className="settings">
+                  <div className="field">
+                    <div className="label">Output filename</div>
+                    <input
+                      type="text"
+                      value={extractFilename}
+                      onChange={(e) => setExtractFilename(e.target.value)}
+                      placeholder={`extracted_${ymd()}.pdf`}
+                      disabled={isWorking}
+                    />
+                  </div>
+
+                  <div className="field">
+                    <div className="label">Page range</div>
+                    <input
+                      type="text"
+                      value={extractRange}
+                      onChange={(e) => setExtractRange(e.target.value)}
+                      placeholder="1-3,6,9-12"
+                      disabled={isWorking}
+                    />
+                    <div className="hint">
+                      Use commas and hyphens. Example: 1-3,6,9-12
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="panel">
               {activeCount === 0 ? (
                 <div className="empty">
-                  <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                    {toolLabel(tool)}
-                  </div>
-                  <div>
-                    Add files to see the reorder list. Nothing gets uploaded.
+                  <div className="emptyTitle">{toolLabel(tool)}</div>
+                  <div className="emptyNote">
+                    Add files to see the list. Nothing gets uploaded.
                   </div>
                 </div>
               ) : (
@@ -708,21 +1135,40 @@ export default function App() {
                         <div style={{ textAlign: "right" }}>Actions</div>
                       </div>
 
-                      {tool === "merge"
-                        ? pdfItems.map((it, idx) => {
-                            const pages =
-                              it.pages === null ? "n/a" : String(it.pages);
-                            const info = `${pages} page(s) • ${bytesToMb(
-                              it.file.size
-                            )} MB`;
-                            return (
-                              <SortableRow
-                                key={it.id}
-                                id={it.id}
-                                title={`${idx + 1}. ${it.file.name}`}
-                                subtitle={"PDF"}
-                                info={info}
-                                actions={
+                      {tool === "merge" &&
+                        pdfItems.map((it, idx) => {
+                          const pages =
+                            it.pages === null ? "n/a" : String(it.pages);
+                          const info = `${pages} page(s) • ${bytesToMb(
+                            it.file.size
+                          )} MB`;
+                          const isTop = idx === 0;
+                          const isBottom = idx === pdfItems.length - 1;
+                          return (
+                            <SortableRow
+                              key={it.id}
+                              id={it.id}
+                              title={`${idx + 1}. ${it.file.name}`}
+                              subtitle={"PDF"}
+                              info={info}
+                              actions={
+                                <>
+                                  <button
+                                    type="button"
+                                    className="miniBtn"
+                                    onClick={() => movePdf(idx, -1)}
+                                    disabled={isWorking || isTop}
+                                  >
+                                    Up
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="miniBtn"
+                                    onClick={() => movePdf(idx, 1)}
+                                    disabled={isWorking || isBottom}
+                                  >
+                                    Down
+                                  </button>
                                   <button
                                     type="button"
                                     className="miniBtn"
@@ -731,50 +1177,94 @@ export default function App() {
                                   >
                                     Remove
                                   </button>
-                                }
-                              />
-                            );
-                          })
-                        : imgItems.map((it, idx) => {
-                            const dim =
-                              it.width && it.height
-                                ? `${it.width}×${it.height}`
-                                : "n/a";
-                            const rot = it.rotation ? ` • ${it.rotation}°` : "";
-                            const info = `${dim}${rot} • ${bytesToMb(
-                              it.file.size
-                            )} MB`;
-                            return (
-                              <SortableRow
-                                key={it.id}
-                                id={it.id}
-                                title={`${idx + 1}. ${it.file.name}`}
-                                subtitle={"Image"}
-                                info={info}
-                                actions={
-                                  <>
-                                    <button
-                                      type="button"
-                                      className="miniBtn"
-                                      onClick={() => rotateImg(it.id)}
-                                      disabled={isWorking}
-                                      title="Rotate 90°"
-                                    >
-                                      Rotate
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="miniBtn"
-                                      onClick={() => removeImg(it.id)}
-                                      disabled={isWorking}
-                                    >
-                                      Remove
-                                    </button>
-                                  </>
-                                }
-                              />
-                            );
-                          })}
+                                </>
+                              }
+                            />
+                          );
+                        })}
+
+                      {tool === "img2pdf" &&
+                        imgItems.map((it, idx) => {
+                          const dim =
+                            it.width && it.height
+                              ? `${it.width}×${it.height}`
+                              : "n/a";
+                          const rot = it.rotation ? ` • ${it.rotation}°` : "";
+                          const info = `${dim}${rot} • ${bytesToMb(
+                            it.file.size
+                          )} MB`;
+                          const isTop = idx === 0;
+                          const isBottom = idx === imgItems.length - 1;
+                          return (
+                            <SortableRow
+                              key={it.id}
+                              id={it.id}
+                              title={`${idx + 1}. ${it.file.name}`}
+                              subtitle={"Image"}
+                              info={info}
+                              actions={
+                                <>
+                                  <button
+                                    type="button"
+                                    className="miniBtn"
+                                    onClick={() => moveImg(idx, -1)}
+                                    disabled={isWorking || isTop}
+                                  >
+                                    Up
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="miniBtn"
+                                    onClick={() => moveImg(idx, 1)}
+                                    disabled={isWorking || isBottom}
+                                  >
+                                    Down
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="miniBtn"
+                                    onClick={() => rotateImg(it.id)}
+                                    disabled={isWorking}
+                                    title="Rotate 90°"
+                                  >
+                                    Rotate
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="miniBtn"
+                                    onClick={() => removeImg(it.id)}
+                                    disabled={isWorking}
+                                  >
+                                    Remove
+                                  </button>
+                                </>
+                              }
+                            />
+                          );
+                        })}
+
+                      {tool === "extract" &&
+                        extractItem && (
+                          <SortableRow
+                            key={extractItem.id}
+                            id={extractItem.id}
+                            title={`${extractItem.file.name}`}
+                            subtitle={"PDF"}
+                            info={`${extractItem.pages ?? "n/a"} page(s) • ${bytesToMb(
+                              extractItem.file.size
+                            )} MB`}
+                            actions={
+                              <button
+                                type="button"
+                                className="miniBtn"
+                                onClick={removeExtract}
+                                disabled={isWorking}
+                              >
+                                Remove
+                              </button>
+                            }
+                          />
+                        )}
                     </div>
                   </SortableContext>
                 </DndContext>
@@ -788,6 +1278,18 @@ export default function App() {
           fully in your browser.
         </div>
       </div>
+
+      <Toast
+        open={!!undo}
+        message={
+          undo
+            ? `${undo.tool === "img2pdf" ? "Image" : "File"} removed.`
+            : ""
+        }
+        actionLabel="Undo"
+        onAction={handleUndo}
+        onClose={() => clearUndo(true)}
+      />
     </div>
   );
 }
