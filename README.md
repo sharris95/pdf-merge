@@ -1,6 +1,9 @@
-# PDF Merge Tool
+# PDF Kit (Merge + Images → PDF)
 
-Merge multiple PDF files locally in your browser. Drag to reorder, then merge and download.
+Two small, local-first tools that run fully in your browser:
+
+- Merge PDFs
+- Convert JPG/PNG images into a single PDF
 
 [![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-live-brightgreen?logo=github)](https://sharris95.github.io/pdf-merge/)
 [![Vercel](https://img.shields.io/badge/Vercel-live-black?logo=vercel)](https://pdf-merge-lime.vercel.app/)
@@ -10,6 +13,10 @@ Merge multiple PDF files locally in your browser. Drag to reorder, then merge an
 - Drag-and-drop PDF upload and reordering
 - Local, in-browser merge (no server uploads)
 - One-click download of the merged PDF
+
+- Drag-and-drop JPG/PNG upload and reordering
+- Basic per-image rotation
+- Convert to PDF (Letter/A4, contain/cover, margin)
 
 ## Live Sites
 
@@ -22,6 +29,12 @@ Merge multiple PDF files locally in your browser. Drag to reorder, then merge an
 npm install
 npm run dev
 ```
+
+## Notes
+
+- The tool uses hash routes for the two tabs:
+  - `#merge`
+  - `#img2pdf`
 
 ## Build
 
