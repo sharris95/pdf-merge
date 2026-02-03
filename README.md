@@ -44,6 +44,8 @@ npm run build
 
 ## Deploy (GitHub Pages)
 
-```bash
-npm run deploy
-```
+GitHub Pages is deployed via GitHub Actions from `main`.
+
+Steps:
+1. In GitHub: Settings → Pages → Source = GitHub Actions.
+2. Push to `main` to trigger a deploy.
